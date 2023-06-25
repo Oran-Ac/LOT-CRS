@@ -14,3 +14,20 @@ dataset (i.e., covering all the items evenly) for improving LOng-Tail recommenda
 two pre-training tasks to enhance the understanding of simulated conversation for long-tail items, and adopt retrieval-augmented
 fine-tuning with label smoothness strategy to further improve the recommendation of long-tail items. Extensive experiments on two
 public CRS datasets have demonstrated the effectiveness and extensibility of our approach, especially on long-tail recommendation.
+![model](./asset/model.png)
+
+## Environment Configuration
+### Build Docker Image
+```bash
+$ docker build -f Dockerfile -t LOT-CRS .
+```
+### Create Docker Container
+```bash
+$ docker run --name=LOT-CRS --gpus all -it -v <your_path_to_folder>:/Privacy-in-Code-Models LOT-CRS:latest
+```
+
+### Settings
+```bash
+$ accelerate config # set your accelerate config for training
+$ wandb login # login to track training process
+```
