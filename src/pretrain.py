@@ -26,7 +26,7 @@ from transformers import (
 )
 from transformers.utils.versions import require_version
 from utils.args import BACKBONE_MODEL_MAPPINGS,MODEL_TYPES_MAPPING
-from utils.utils import get_embeddings_for_movie_name,resize_token_embeddings
+from utils.utils import get_embeddings_for_movie_name,resize_token_embeddings,add_tokens_for_tokenizer
 
 
 logger = get_logger(__name__)
@@ -153,6 +153,7 @@ def parse_args():
 
     args.data_file_path = os.path.join(args.data_file_path,args.data_type)
     os.makedirs(args.data_file_path,exist_ok=True)
+    os.makedirs(os.path.join(args.data_file_path,args.backbone_model,'pretrain'),exist_ok=True)
 
     os.makedirs(args.logging_dir,exist_ok=True)
 
@@ -201,7 +202,7 @@ def get_process_data(original_data_path,tokenizer,prefix_matters,test_mode=False
         context_tokens  = tokenizer.encode(
                             text = n_d,
                             add_special_tokens = True,
-                            max_length = 512,
+                            max_length = 128,
                             padding='max_length',
                             truncation=True
                             )
@@ -254,11 +255,14 @@ def main():
     # 加载训练集 测试集
     # undo: 这个地方有问题，dataset不能加载此前的，此前的进行过填充，应该1. 如果没有用过该分词处理，则用分词处理，且@的表示应该保留 2. 如果处理后，可以直接加载
     # 分词器1.添加带@的新词 2. 分词 3. 获得@的表示并保存，便于后续进行初始化
-    if args.reloadDataset and os.path.exists(os.path.join(args.data_file_path,args.backbone_model,'processed_dialogue_valid.pkl')):
+    train_dataset_path = os.path.join(args.data_file_path,args.backbone_model,'pretrain','processed_dialogue.pkl')
+    eval_dataset_path = os.path.join(args.data_file_path,args.backbone_model,'pretrain','processed_dialogue_valid.pkl')
+    
+    if args.reloadDataset and os.path.exists(train_dataset_path) and os.path.exists(eval_dataset_path):
 
-        with open(os.path.join(args.data_file_path,args.backbone_model,'pretrain','processed_dialogue.pkl'),'rb') as f:
+        with open(train_dataset_path,'rb') as f:
             train_dataset = pickle.load(f)
-        with open(os.path.join(args.data_file_path,args.backbone_model,'pretrain','processed_dialogue_valid.pkl'),'rb') as f:
+        with open(eval_dataset_path,'rb') as f:
             eval_dataset = pickle.load(f)
         
         if args.test_mode:
@@ -271,25 +275,27 @@ def main():
         new_embeddings = torch.load(os.path.join(args.data_file_path,args.backbone_model,'movie_embedding.pt'))
 
         new_num_tokens = len(tokenizer) + new_embeddings.shape[0]
+        tokenizer = add_tokens_for_tokenizer(tokenizer,args.data_type)
 
         if accelerator.is_main_process:
             logger.info('[Load dataset]')
     else:
         if not os.path.exists(os.path.join(args.data_file_path,args.backbone_model)):
             os.mkdir(os.path.join(args.data_file_path,args.backbone_model))
-        train_dataset_path = os.path.join(args.data_file_path,args.backbone_model,'pretrain','processed_dialogue.pkl')
-        eval_dataset_path = os.path.join(args.data_file_path,args.backbone_model,'pretrain','processed_dialogue_valid.pkl')
         logger.info(['Get Embeddings For Movie Name'])
         tokenizer,new_embeddings = get_embeddings_for_movie_name(tokenizer,model,os.path.join(args.data_file_path,args.backbone_model),args.backbone_model,args.data_type)
         new_num_tokens = len(tokenizer)
 
         eval_dataset =  get_process_data(os.path.join(args.data_file_path,'original','pretrain','dialogue_shuffle_valid.pkl'),tokenizer,args.prefix_matters)
+        
+        with open(eval_dataset_path,'wb') as f:
+            pickle.dump(eval_dataset,f)
+
         train_dataset = get_process_data(os.path.join(args.data_file_path,'original','pretrain','dialogue_shuffle.pkl'),tokenizer,args.prefix_matters)
 
         with open(train_dataset_path,'wb') as f:
             pickle.dump(train_dataset,f)
-        with open(eval_dataset_path,'wb') as f:
-            pickle.dump(eval_dataset,f)
+        
         with open(os.path.join(args.data_file_path,args.backbone_model,'movie_embedding.pt'),'wb') as f:
             torch.save(new_embeddings,f)
         
@@ -478,8 +484,9 @@ def main():
             output_dir = f"epoch_{epoch}"
             if args.output_dir is not None:
                 output_dir = os.path.join(args.output_dir, output_dir)
+                os.makedirs(output_dir, exist_ok=True)
             accelerator.save_state(output_dir)
-        accelerator.end_training()
+    accelerator.end_training()
 
 
     if args.output_dir is not None:
