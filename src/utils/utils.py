@@ -72,27 +72,29 @@ def add_tokens_for_tokenizer(tokenizer,data_type):
 faiss related
 ----------------
 '''
-def faiss_search(representation,faiss_index,dstore_keys,dstore_vals,k,device):
+def faiss_search(representation,faiss_index,dstore_keys,dstore_vals,dstore_labels,k,device):
     D,I = faiss_index.search(representation.detach().float().cpu().numpy(),k) #[bz,K]
     batch_faiss_vecs = None
     batch_faiss_labels = []
     for i,each in enumerate(I):
         each = np.delete(each, np.where(each == -1))
-        faiss_vecs = torch.from_numpy(dstore_keys[each]).to(device) #[k,hidden_size]
-        faiss_labels = dstore_vals[each].tolist() #[k,1]
+        faiss_vecs = torch.from_numpy(dstore_vals[each]).to(device) #[k,hidden_size]
+        if dstore_labels is not None:
+            faiss_labels = dstore_labels[each].tolist() #[k,1]
         if i  == 0:
             batch_faiss_vecs = faiss_vecs.unsqueeze(0)
         else:
             batch_faiss_vecs = torch.cat((batch_faiss_vecs,faiss_vecs.unsqueeze(0)),dim=0) #[bz,k,hidden_size]
         assert batch_faiss_vecs.shape[0] == i+1
-        batch_faiss_labels.append(faiss_labels)
+        if dstore_labels is not None:
+            batch_faiss_labels.append(faiss_labels)
     return {
         'batch_faiss_vecs':batch_faiss_vecs,
-        'batch_faiss_labels':batch_faiss_labels
+        'batch_faiss_labels':batch_faiss_labels  if dstore_labels is not None else None,
     }
 
 
-def faiss_search_train_retrieval(faiss_index,dstore_keys,dstore_vals,representation,correct_k_num,fake_k_num,device,groundTruth):
+def faiss_search_train_retrieval(faiss_index,dstore_keys,dstore_vals,dstore_labels,representation,correct_k_num,fake_k_num,device,groundTruth):
     search_k = correct_k_num + fake_k_num
     ref = None
     logist = None
@@ -100,8 +102,8 @@ def faiss_search_train_retrieval(faiss_index,dstore_keys,dstore_vals,representat
     for i,each in enumerate(I):
         '''找出正例和负例'''
         label = groundTruth[i] 
-        same_label_index = np.where(dstore_vals==label)[0]
-        fake_label_index = np.where(dstore_vals!=label)[0]
+        same_label_index = np.where(dstore_labels==label)[0]
+        fake_label_index = np.where(dstore_labels!=label)[0]
 
         '''pretrain_dataset里有的movie_item没有'''
         if same_label_index.shape[0] < correct_k_num:
@@ -110,7 +112,7 @@ def faiss_search_train_retrieval(faiss_index,dstore_keys,dstore_vals,representat
 
         each = np.delete(each, np.where(each == -1))
 
-        correct_index = np.delete(each,np.where(dstore_vals[each]!= label))
+        correct_index = np.delete(each,np.where(dstore_labels[each]!= label))
         same_label_index = np.setdiff1d(same_label_index,correct_index) # 新添加的不能是已经出现的
         if correct_index.shape[0] <correct_k_num:
             sample_num = correct_k_num-correct_index.shape[0]
@@ -119,7 +121,7 @@ def faiss_search_train_retrieval(faiss_index,dstore_keys,dstore_vals,representat
         else:
             correct_index = np.random.choice(correct_index,correct_k_num,replace=False)
         
-        fake_index = np.delete(each,np.where(dstore_vals[each]== label))
+        fake_index = np.delete(each,np.where(dstore_labels[each]== label))
         fake_label_index = np.setdiff1d(fake_label_index,fake_index)
         if fake_index.shape[0] <fake_k_num:
             sample_num = fake_k_num-fake_index.shape[0]

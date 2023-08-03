@@ -34,8 +34,10 @@ from transformers.tokenization_utils_base import BatchEncoding, PaddingStrategy,
 from transformers.trainer_utils import is_main_process
 from transformers.data.data_collator import DataCollatorForLanguageModeling
 from transformers.file_utils import cached_property, torch_required, is_torch_available, is_torch_tpu_available
-from simcse.models import RobertaForCL, BertForCL
+from simcse.models import RobertaForCL, BertForCL, BartForCL
 from simcse.trainers import CLTrainer
+
+from utils.utils import *
 
 logger = logging.getLogger(__name__)
 MODEL_CONFIG_CLASSES = list(MODEL_FOR_MASKED_LM_MAPPING.keys())
@@ -123,6 +125,39 @@ class ModelArguments:
         }
     )
 
+    # LOT-CRS's arguments
+    use_crs: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to use CRS auxiliary objective."
+        }
+    )
+    pretrained_crs_model: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "The pretrained CRS model checkpoint for weights initialization."
+        }
+    )
+    test_mode: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to use test mode (only use 10 data)."
+        }
+    )
+    crs_model_path: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "The CRS model checkpoint for weights initialization."
+        }
+    )
+    backbone_model: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "The backbone model "
+        }
+    )
+
+
 
 @dataclass
 class DataTrainingArguments:
@@ -173,6 +208,16 @@ class DataTrainingArguments:
     mlm_probability: float = field(
         default=0.15, 
         metadata={"help": "Ratio of tokens to mask for MLM (only effective if --do_mlm)"}
+    )
+
+    # LOT-CRS's arguments
+    data_type: Optional[str] = field(
+        default=None,
+        metadata={"help": "The type of data to use"}
+    )
+    data_root: Optional[str] = field(
+        default=None,
+        metadata={"help": "The root directory of the data"}
     )
 
     def __post_init__(self):
@@ -309,6 +354,11 @@ def main():
         datasets = load_dataset(extension, data_files=data_files, cache_dir="./data/", delimiter="\t" if "tsv" in data_args.train_file else ",")
     else:
         datasets = load_dataset(extension, data_files=data_files, cache_dir="./data/")
+    
+    if model_args.test_mode:
+        datasets["train"] = datasets["train"].select(range(100))
+        logger.info(f"Running in test mode, using only {len(datasets)} examples.")
+        # os.environ["WANDB_DISABLED"] = "true"  # disable wandb
 
     # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
     # https://huggingface.co/docs/datasets/loading_datasets.html.
@@ -371,6 +421,16 @@ def main():
             if model_args.do_mlm:
                 pretrained_model = BertForPreTraining.from_pretrained(model_args.model_name_or_path)
                 model.lm_head.load_state_dict(pretrained_model.cls.predictions.state_dict())
+        elif 'bart' in model_args.model_name_or_path:
+            model = BartForCL.from_pretrained(
+                model_args.model_name_or_path,
+                from_tf=bool(".ckpt" in model_args.model_name_or_path),
+                config=config,
+                cache_dir=model_args.cache_dir,
+                revision=model_args.model_revision,
+                use_auth_token=True if model_args.use_auth_token else None,
+                model_args=model_args
+            )
         else:
             raise NotImplementedError
     else:
@@ -379,6 +439,25 @@ def main():
         model = AutoModelForMaskedLM.from_config(config)
 
     model.resize_token_embeddings(len(tokenizer))
+
+    if model_args.use_crs:
+        logger.info("Loading CRS model from %s", model_args.crs_model_path)
+        new_embeddings = torch.load(os.path.join(data_args.data_root,model_args.backbone_model,'movie_embedding.pt'))
+        new_num_tokens = len(tokenizer) + new_embeddings.shape[0]
+        tokenizer = add_tokens_for_tokenizer(tokenizer,data_args.data_type)
+        model = resize_token_embeddings(model,new_embeddings,new_num_tokens)
+        if model_args.backbone_model == 'bert':
+            model.load_state_dict(torch.load(model_args.crs_model_path), strict=False) #Missing key(s) in state_dict: "mlp.dense.weight", "mlp.dense.bias". 
+        elif model_args.backbone_model == 'bart':
+            model_state_dict = torch.load(model_args.crs_model_path)
+            for key in list(model_state_dict.keys()):
+                if 'model' in key:
+                    model_state_dict[key.replace('model','bart')] = model_state_dict[key]
+                    del model_state_dict[key]
+            model.load_state_dict(model_state_dict)
+            del model_state_dict
+        else:
+            model.load_state_dict(torch.load(model_args.crs_model_path))
 
     # Prepare features
     column_names = datasets["train"].column_names

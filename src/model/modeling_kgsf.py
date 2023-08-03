@@ -158,7 +158,7 @@ class KGSF(nn.Module):
 
         logging.debug('[Finish build rec layer]')
 
-    def recommend(self, batch):
+    def recommend(self, batch,mode):
         """
         context_entities: (batch_size, entity_length)
         context_words: (batch_size, word_length)
@@ -183,24 +183,45 @@ class KGSF(nn.Module):
         user_rep = self.gate_layer(entity_attn_rep, word_attn_rep)
         rec_scores = F.linear(user_rep, entity_graph_representations, self.rec_bias.bias)  # (bs, #entity)
 
+        # 注意不同mode下的rec_scores不同
+        if mode == 'teacher':
+            return {
+                'rec_scores':rec_scores[:,self.movie_ids], #convert #n_entity to #n_movie
+                'scores':rec_scores,
+                'user_rep':user_rep,
+                'word_representations':word_representations,  #[batch_size,context_words_num,max_len=128]
+                'word_padding_mask':word_padding_mask,#[batch_size,context_words_num]
+                'entity_representations':entity_representations, #[batch_size,context_entities_num,max_len=128]
+                'entity_padding_mask':entity_padding_mask,  #[batch_size,context_entities_num]
+                'entity_graph_representations':entity_graph_representations
+            }
+        elif mode == 'train' or mode == 'test':
+            movie = batch['item_batch']
+            rec_loss = self.rec_loss(rec_scores, movie)
 
-        return {
-            'rec_scores':rec_scores[:,self.movie_ids],
-            'scores':rec_scores,
-            'user_rep':user_rep,
-            'word_representations':word_representations,  #[batch_size,context_words_num,max_len=128]
-            'word_padding_mask':word_padding_mask,#[batch_size,context_words_num]
-            'entity_representations':entity_representations, #[batch_size,context_entities_num,max_len=128]
-            'entity_padding_mask':entity_padding_mask,  #[batch_size,context_entities_num]
-            'entity_graph_representations':entity_graph_representations
-        }
+            entity_labels = batch['entity_labels_batch']
+            info_loss_mask = torch.sum(entity_labels)
+            if info_loss_mask.item() == 0:
+                info_loss = None
+            else:
+                word_info_rep = self.infomax_norm(word_attn_rep)  # (bs, dim)
+                info_predict = F.linear(word_info_rep, entity_graph_representations,
+                                        self.infomax_bias.bias)  # (bs, #entity)
+                info_loss = self.infomax_loss(info_predict, entity_labels) / info_loss_mask
+
+            return {
+                'rec_loss':rec_loss,
+                'info_loss':info_loss,
+                'rec_scores':rec_scores, #(bs, #entity)
+                'rec_movie_scores':rec_scores[:,self.movie_ids], #convert #n_entity to #n_movie
+            }
     
     def pretrain(self, batch):
         """
         words: (batch_size, word_length)
         entity_labels: (batch_size, n_entity)
         """
-        words, entity_labels = batch['word_batch'],batch['entity_label_batch']
+        words, entity_labels = batch['word_batch'],batch['entity_labels_batch']
 
         loss_mask = torch.sum(entity_labels)
         if loss_mask.item() == 0:
@@ -216,10 +237,16 @@ class KGSF(nn.Module):
         word_info_rep = self.infomax_norm(word_attn_rep)  # (bs, dim)
         info_predict = F.linear(word_info_rep, entity_graph_representations, self.infomax_bias.bias)  # (bs, #entity)
         loss = self.infomax_loss(info_predict, entity_labels) / loss_mask
-        return loss
+        return {
+            'info_loss':loss,
+        }
 
     def forward(self,batch,mode):
-        if mode == 'recommend':
-            return self.recommend(batch)
+        if mode == 'teacher_recommend':
+            return self.recommend(batch,'teacher')
+        elif mode == 'train':
+            return self.recommend(batch,'train')
+        elif mode == 'test':
+            return self.recommend(batch,'test')
         elif mode == 'pretrain':
             return self.pretrain(batch)

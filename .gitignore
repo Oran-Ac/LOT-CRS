@@ -1,0 +1,7 @@
+wandb
+__pycache__
+logs
+gen
+save
+data
+result

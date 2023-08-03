@@ -494,7 +494,7 @@ def main():
         unwrapped_model = accelerator.unwrap_model(model)
         # done:用accelerator.save保存模型，先判断accelerator.is_main_process
         if accelerator.is_main_process:
-            accelerator.save(unwrapped_model.state_dict(),os.path.join(args.output_dir,f'pretrian_{args.backbone_model}.pth'))
+            accelerator.save(unwrapped_model.state_dict(),os.path.join(args.output_dir,f'pretrain_{args.backbone_model}.pth'))
             logger.info(f'[Model saved]: pretrian_{args.backbone_model}.pth')
         '''
         unwrapped_model.save_pretrained(

@@ -1,0 +1,24 @@
+# dataloader
+token_max_length: 256
+entity_max_length: 16
+word_max_length: 128
+resp_max_length: 32
+# model
+token_emb_dim: 300
+kg_emb_dim: 128
+num_bases: 8
+# prompt
+prompt_text: you should watch [MASK]
+# vocab
+vocab:
+  pad_token_idx: 0
+  pad_word_idx: 0
+  pad_entity_idx: 0
+redial:
+  movie_ids_path: /workspace/data/redial/original/side_info/movie_ids.json
+  entity2id_path: /workspace/data/redial/original/side_info/entity2id.json
+  token2id_path:  /workspace/data/redial/original/side_info/token2id.json
+  word2id_path: /workspace/data/redial/original/side_info/concept2id.json
+  entity_kg_path: /workspace/data/redial/original/side_info/dbpedia_subkg.json
+  concept_kg_path: /workspace/data/redial/original/side_info/conceptnet_subkg.txt
+  

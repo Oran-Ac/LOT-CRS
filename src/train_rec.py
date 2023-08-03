@@ -1,21 +1,21 @@
 import argparse
-from config import redial_config
+from utils.config import redial_config
 import json
 import logging
 import math
 import os
 import faiss
+import copy
 from torch.nn import functional as F
 from torch import nn
-from dataset import CRSDatasetRecommendation,CRSDataRecommendationCollator
+from dataset.dataset import CRSDatasetRecommendation,CRSDataRecommendationCollator
 import pandas as pd
 import datasets
 import torch
-from modeling_kgsf import KGSF
-from modeling_crs import CRSModel
+from model.modeling_kgsf import KGSF
+from model.modeling_crs import CRSModel
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-from torchviz import make_dot
 import transformers
 from accelerate import Accelerator, DistributedType
 from accelerate.logging import get_logger
@@ -26,15 +26,15 @@ from transformers import (
     # DataCollatorForLanguageModeling,
     # SchedulerType,
     get_linear_schedule_with_warmup,
-    AutoModelForMaskedLM,
+    AutoModel,
     AutoTokenizer
 )
 from transformers.utils.versions import require_version
-from args import BACKBONE_MODEL_MAPPINGS,Movie_Name_Path,AT_TOKEN_NUMBER
-from utils import resize_token_embeddings,add_tokens_for_tokenizer
+from utils.args import BACKBONE_MODEL_MAPPINGS,Movie_Name_Path,AT_TOKEN_NUMBER,MODEL_TYPES_MAPPING
+from utils.utils import resize_token_embeddings,add_tokens_for_tokenizer
 import numpy as np
-from utils import faiss_search,faiss_search_train_retrieval
-from evaluate_rec import RecEvaluator
+from utils.utils import faiss_search,faiss_search_train_retrieval
+from utils.evaluate_rec import RecEvaluator
 
 logger = get_logger(__name__)
 require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/language-modeling/requirements.txt")
@@ -197,6 +197,20 @@ def parse_args():
         '--add_knowledge_prompt',
         action='store_true',
     )
+    parser.add_argument(
+        "--logging_dir",
+        type=str,
+        default=None,
+        help="Where to store the logs.",
+    )
+    parser.add_argument(
+        "--debug",
+        action='store_true',
+    )
+    parser.add_argument(
+        '--early_stop' ,
+       default=3
+    )
     args = parser.parse_args()
     return args
     
@@ -208,9 +222,9 @@ def evaluate_kgsf(KgsfModel,test_dataloader,evaluator,accelerator):
     KgsfModel.eval()
     for step, batch in enumerate(test_dataloader):
         with torch.no_grad():
-            kgsf_outputs = KgsfModel.recommend(batch)
-        rec_scores = kgsf_outputs['rec_scores'] #[0-6924]
-        labels = batch['rec_dbpedia_movie_label_batch'].tolist() #[0-6924]
+            kgsf_outputs = KgsfModel.recommend(batch,'teacher')
+        rec_scores = kgsf_outputs['rec_scores'] #(bz,#n_movie)
+        labels = batch['rec_dbpedia_movie_label_batch'].tolist() #(bz,1) #n_movie
         ranks = torch.topk(rec_scores, k=50, dim=-1).indices.tolist()
         evaluator.evaluate(ranks,labels)
     
@@ -241,22 +255,23 @@ def main():
     
     args = parse_args()
     config = redial_config(args.config_path,args.data_type)
+    config['data_type'] = args.data_type
 
 
     # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
     # If we're using tracking, we also need to initialize it here and it will pick up all supported trackers in the environment
-    accelerator = Accelerator(log_with="all", logging_dir=args.output_dir) if args.with_tracking else Accelerator()
+    accelerator = Accelerator(log_with="wandb", project_dir=args.output_dir) if args.with_tracking else Accelerator()
     # Make one log on every process with the configuration for debugging.
     if accelerator.is_main_process:
-        suffix = 'init'
-        if args.load_trained_model:
-            suffix = args.load_trained_model_path.replace('.pth','')
-            suffix = suffix.split('/')[-1]
+        # suffix = 'init'
+        # if args.load_trained_model:
+        #     suffix = args.load_trained_model_path.replace('.pth','')
+        #     suffix = suffix.split('/')[-1]
         logging.basicConfig( 
                     format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
                     datefmt="%m/%d/%Y %H:%M:%S",
                     level=logging.INFO,           
-                    filename=f'recommend_{suffix}_{args.query_position}.log',
+                    filename=os.path.join(args.logging_dir,f'recommend_{args.backbone_model}_{args.query_position}.log'),
                     filemode='a',##模式，有w和a，w就是写模式，每次都会重新写日志，覆盖之前的日志                    #a是追加模式，默认如果不写的话，就是追加模式                    format=                    '%(asctime)s - %(pathname)s[line:%(lineno)d] - %(levelname)s: %(message)s'                    #日志格式
                     )
         logger.info(json.dumps(vars(args),indent=2))
@@ -272,11 +287,11 @@ def main():
     if args.seed is not None:
         set_seed(args.seed)
 
-        if accelerator.is_main_process:
-            logger.info("Training new model from scratch")
+    # if accelerator.is_main_process:
+    #     logger.info("Training new model from scratch")
     logger.info(f"*[BACK BONE MODEL]*: {args.backbone_model}")
 
-    backbone_model = AutoModelForMaskedLM.from_pretrained(BACKBONE_MODEL_MAPPINGS[args.backbone_model])
+    backbone_model = MODEL_TYPES_MAPPING[args.backbone_model].from_pretrained(BACKBONE_MODEL_MAPPINGS[args.backbone_model])
     tokenizer = AutoTokenizer.from_pretrained(BACKBONE_MODEL_MAPPINGS[args.backbone_model]) 
     KGSFModel =  KGSF(config,accelerator.device,args.kgsf_model_path)
 
@@ -292,42 +307,58 @@ def main():
     if args.load_trained_model:
         check_point= torch.load(args.load_trained_model_path)
         logger.info('[Train Retrieval after Pretrain]')
+        if args.backbone_model == 'bert':
+            check_point.pop('mlp.dense.weight')
+            check_point.pop('mlp.dense.bias')
+        elif args.backbone_model == 'bart':
+            for key in list(check_point.keys()):
+                if 'bart' in key:
+                    check_point[key.replace('bart','model')] = check_point[key]
+                    del check_point[key]
         backbone_model.load_state_dict(check_point,strict=True)
         logger.info(f'[Load the trained model]: {args.load_trained_model_path}')
     
-    tokenizer = add_tokens_for_tokenizer(tokenizer)
+    tokenizer = add_tokens_for_tokenizer(tokenizer,args.data_type)
     config['vocab']['msk_context_idx'] = tokenizer.mask_token_id
     config['vocab']['pad_context_idx'] = tokenizer.pad_token_id
     config['vocab']['eos_context_idx'] = tokenizer.eos_token_id
+
     
-    model = CRSModel(backbone_model,model_type =args.backbone_model,query_position = args.query_position,opt=config)
+    model = CRSModel(backbone_model,
+                    model_type =args.backbone_model,
+                    query_position = args.query_position,
+                    opt=config,
+                    add_knowledge_prompt = args.add_knowledge_prompt)
     kd_function = nn.KLDivLoss(reduction='batchmean') # 真实kl
     retrieval_function = nn.CrossEntropyLoss()
     evaluator = RecEvaluator()
     
     # 加载训练集 测试集
-    # undo: 数据集处理，应该和unicrs对齐（1，添加word分词 2用@替换电影）
+    # 数据集处理，和unicrs对齐（1，添加word分词 2用@替换电影）
     # 分词器1.添加带@的新词 2. 分词 3. 获得@的表示并保存，便于后续进行初始化
-    train_dataset = CRSDatasetRecommendation(args.data_file_path,args.data_type,'train',word_pad_index = config['vocab']['pad_word_idx'],
+    train_dataset = CRSDatasetRecommendation(args.data_file_path,args.backbone_model,args.data_type,'train',word_pad_index = config['vocab']['pad_word_idx'],
                                             entity_pad_index = config['vocab']['pad_entity_idx'],context_tokenizer = tokenizer,
                                             dbpedia_tokenzier = config['graph']['entity2id'],word_tokenizer = config['graph']['token2id'],
                                             token_max_length = config['token_max_length'], entity_max_length=config['entity_max_length'],word_max_length=config['word_max_length'],
                                             prompt_text = config['prompt_text'],
                                             save_data= args.save_data,reload_data = args.reload_data,
+                                            debug=args.debug,
                                             )
-    test_dataset = CRSDatasetRecommendation(args.data_file_path,args.data_type,'test',word_pad_index = config['vocab']['pad_word_idx'],
+    test_dataset = CRSDatasetRecommendation(args.data_file_path,args.backbone_model,args.data_type,'test',word_pad_index = config['vocab']['pad_word_idx'],
                                             entity_pad_index = config['vocab']['pad_entity_idx'],context_tokenizer = tokenizer,
                                             dbpedia_tokenzier = config['graph']['entity2id'],word_tokenizer = config['graph']['token2id'],
                                             token_max_length = config['token_max_length'], entity_max_length=config['entity_max_length'],word_max_length=config['word_max_length'],
                                             prompt_text = config['prompt_text'],
                                             save_data= args.save_data,reload_data = args.reload_data,
+                                            debug=args.debug,
                                             )
-    valid_dataset = CRSDatasetRecommendation(args.data_file_path,args.data_type,'valid',word_pad_index = config['vocab']['pad_word_idx'],
+    valid_dataset = CRSDatasetRecommendation(args.data_file_path,args.backbone_model,args.data_type,'valid',word_pad_index = config['vocab']['pad_word_idx'],
                                             entity_pad_index = config['vocab']['pad_entity_idx'],context_tokenizer = tokenizer,
                                             dbpedia_tokenzier = config['graph']['entity2id'],word_tokenizer = config['graph']['token2id'],
                                             token_max_length = config['token_max_length'], entity_max_length=config['entity_max_length'],word_max_length=config['word_max_length'],
                                             prompt_text = config['prompt_text'],
                                             save_data= args.save_data,reload_data = args.reload_data,
+                                            debug=args.debug,
                                             )
     data_collator = CRSDataRecommendationCollator(config['vocab'])
     # DataLoaders creation:
@@ -338,8 +369,14 @@ def main():
     test_dataloader = DataLoader(test_dataset, collate_fn=data_collator, batch_size=args.per_device_test_batch_size)
     
     logger.info(f'[Loading PretrainDataset knn encode by Pretrain]: {args.dstore_path}')
-    dstore_keys = np.load(os.path.join(args.dstore_path,args.backbone_model,'keys.npy'))
-    dstore_vals = np.load(os.path.join(args.dstore_path,args.backbone_model,'vals.npy'))
+    """
+    dstore_keys: 用于query算相似度排序
+    dstore_vals: 用于算multihead attention
+    dstore_labels: 用于算loss
+    """
+    dstore_keys = np.load(os.path.join(args.dstore_path,'history_representations.npy'))
+    dstore_vals = np.load(os.path.join(args.dstore_path,'recommendation_representations.npy'))
+    dstore_labels = np.load(os.path.join(args.dstore_path,'label.npy'))
     logger.info(f"[dstore_keys]:{dstore_keys.shape}")
     # Optimizer
     # Split weights in two groups, one with weight decay and the other not.
@@ -400,23 +437,26 @@ def main():
         logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
         logger.info(f"  Total optimization steps = {args.max_train_steps}")
         logger.info(f"  Query position: {args.query_position}")
+        if args.debug:
+            logger.info(f"  [!!! Debugging mode !!!]")
     # test KSGF first
     logger.info(f"  [TEST KGSF MODEL]")
     test_kgsf = evaluate_kgsf(KGSFModel,test_dataloader,evaluator,accelerator)
-    if args.with_tracking:
-        accelerator.log(test_kgsf)
-    else:
-        logger.info(test_kgsf)
+    logger.info(test_kgsf)
 
     # faiss_to_gpu 
-    # todo:检查能否正常工作,特别是指定gpu
+    logger.info("  [Begin FAISS TO GPU]")
     provider = faiss.StandardGpuResources()  # use a single GPU
     faiss_index = faiss.IndexFlatIP(768)
     faiss_index = faiss.index_cpu_to_gpu(provider, 0, faiss_index)
     faiss_index.add(dstore_keys)
+    logger.info("  [Finish FAISS TO GPU]")
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_main_process)
     completed_steps = 0
+    best_model_state_dict = None
+    best_model_metric = -1
+    best_model_epoch = -1
     for epoch in range(args.num_train_epochs):
         model.train()
         KGSFModel.eval()
@@ -432,23 +472,28 @@ def main():
             4.蒸馏loss
             '''
             with torch.no_grad():
-                kgsf_outputs = KGSFModel.recommend(batch)
+                kgsf_outputs = KGSFModel.recommend(batch,'teacher')
             batch['word_representations'] = kgsf_outputs['word_representations']
             batch['entity_representations'] = kgsf_outputs['entity_representations']
             batch['entity_graph_representations'] = kgsf_outputs['entity_graph_representations']
-            query_representation,last_hidden_states = model(batch,mode ='query_representation',faiss_weight=args.faiss_weight,add_knowledge_prompt=args.add_knowledge_prompt)
+            query_representation,last_hidden_states = model(batch,mode ='query_representation')
             batch['last_hidden_states'] = last_hidden_states
             #done:检查这里的device加载对没有
-            faiss_aug = faiss_search(query_representation,faiss_index,dstore_keys,dstore_vals,args.retrieval_k,accelerator.device)
+            faiss_aug = faiss_search(representation = query_representation,
+                                    faiss_index = faiss_index,
+                                    dstore_keys = dstore_keys,
+                                    dstore_vals = dstore_vals,
+                                    dstore_labels = dstore_labels,
+                                    k = args.retrieval_k,
+                                    device = accelerator.device)
             # print(query_representation.shape)
             # print(last_hidden_states.shape)
             # print(faiss_aug['batch_faiss_vecs'].shape)
             assert faiss_aug['batch_faiss_vecs'].shape[0] == last_hidden_states.shape[0]
             batch['faiss_aug_representation'] = faiss_aug['batch_faiss_vecs']
             # recommend
-            outputs =  model(batch,mode ='faiss_aug_recommendation',faiss_weight=args.faiss_weight,add_knowledge_prompt=args.add_knowledge_prompt)
+            outputs =  model(batch,mode ='faiss_aug_recommendation',faiss_weight=args.faiss_weight)
             # 蒸馏
-            # todo:check 顺序是matched
             student_predict = outputs['movie_scores']
             teacher_predict = kgsf_outputs['rec_scores']
 
@@ -457,7 +502,16 @@ def main():
             loss_kd = kd_function(student_predict,teacher_predict)
 
             # 召回的loss
-            ref,logist = faiss_search_train_retrieval(faiss_index,dstore_keys,dstore_vals,query_representation,args.correct_k_num,args.fake_k_num,accelerator.device,batch['label_batch'].tolist()) #[bz,n,hidden]
+            ref,logist = faiss_search_train_retrieval(
+                                faiss_index = faiss_index,
+                                dstore_keys = dstore_keys,
+                                dstore_vals = dstore_vals,
+                                dstore_labels = dstore_labels,
+                                representation = query_representation,
+                                correct_k_num =args.correct_k_num,
+                                fake_k_num = args.fake_k_num,
+                                device = accelerator.device,
+                                groundTruth = batch['label_batch'].tolist()) #[bz,n,hidden]
             labels = torch.zeros(logist.shape[0],device=accelerator.device).long()
             logist = logist.to(accelerator.device)
             retrieval_loss = None
@@ -485,6 +539,16 @@ def main():
                 progress_bar.update(1)
                 completed_steps += 1
         logger.info(f'epoch {epoch}\n train loss: {np.mean(total_loss)}, kd_loss: {np.mean(kd_loss)}, faiss_loss:{np.mean(faiss_loss)}, rec_loss: {np.mean(rec_loss)}')
+        if args.with_tracking:
+            accelerator.log(
+                {
+                    "epoch": epoch,
+                    "total_loss": np.mean(total_loss),
+                    "kd_loss": np.mean(kd_loss),
+                    "faiss_loss": np.mean(faiss_loss),
+                    "rec_loss": np.mean(rec_loss),
+                }
+            )
         # test
         model.eval()
         test_loss = []
@@ -493,21 +557,27 @@ def main():
 
             with torch.no_grad():
                 
-                kgsf_outputs = KGSFModel.recommend(batch)
+                kgsf_outputs = KGSFModel.recommend(batch,'teacher')
                 batch['word_representations'] = kgsf_outputs['word_representations']
                 batch['entity_representations'] = kgsf_outputs['entity_representations']
                 batch['entity_graph_representations'] = kgsf_outputs['entity_graph_representations']
-                query_representation,last_hidden_states = model(batch,mode ='query_representation',faiss_weight=args.faiss_weight,add_knowledge_prompt=args.add_knowledge_prompt)
+                query_representation,last_hidden_states = model(batch,mode ='query_representation')
                 batch['last_hidden_states'] = last_hidden_states
                 #done:检查这里的device加载对没有
-                faiss_aug = faiss_search(query_representation,faiss_index,dstore_keys,dstore_vals,args.retrieval_k,accelerator.device)
+                faiss_aug = faiss_search(representation = query_representation,
+                                    faiss_index = faiss_index,
+                                    dstore_keys = dstore_keys,
+                                    dstore_vals = dstore_vals,
+                                    dstore_labels = dstore_labels,
+                                    k = args.retrieval_k,
+                                    device = accelerator.device)
                 # print(query_representation.shape)
                 # print(last_hidden_states.shape)
                 # print(faiss_aug['batch_faiss_vecs'].shape)
                 assert faiss_aug['batch_faiss_vecs'].shape[0] == last_hidden_states.shape[0]
                 batch['faiss_aug_representation'] = faiss_aug['batch_faiss_vecs']
                 # recommend
-                outputs =  model(batch,mode ='faiss_aug_recommendation',faiss_weight=args.faiss_weight,add_knowledge_prompt=args.add_knowledge_prompt)
+                outputs =  model(batch,mode ='faiss_aug_recommendation',faiss_weight=args.faiss_weight)
             test_loss.append(float(outputs['rec_loss']))
             rec_scores = outputs['movie_scores'] #[0-6924] /[0-len(self.movie-id)]
             ranks = torch.topk(rec_scores, k=50, dim=-1).indices.tolist()
@@ -539,15 +609,35 @@ def main():
 
         test_report['test/loss'] = np.mean(test_loss)
         test_report['epoch'] = epoch
-        test_report = json.dumps(test_report,indent=2)
-        logger.info(f'{test_report}')
         if args.with_tracking:
                 accelerator.log(
             test_report
         )
+        # see if we have a new best
+        if test_report[f'{args.backbone_model}/test/tail_coverage@10'] > best_model_metric:
+            best_model_metric = test_report[f'{args.backbone_model}/test/tail_coverage@10']
+            best_model_epoch = epoch
+            best_model_state_dict = copy.deepcopy(model.state_dict())
+            logger.info(f'[new best model saved] at epoch {best_model_epoch}')
+
+        test_report = json.dumps(test_report,indent=2)
+        logger.info(f'{test_report}')
+    
+        # early stop
+        if epoch - best_model_epoch > args.early_stop and best_model_epoch != -1:
+            logger.info(f'early stop at epoch {epoch}')
+            break
+
         evaluator.reset_metric()
     
-    # undo:模型保存
+    accelerator.end_training()
+    # 模型保存
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        os.makedirs(args.output_dir,exist_ok=True)
+        accelerator.save(best_model_state_dict,os.path.join(args.output_dir,f'{agrs.backbone_model}_recommend.pth'))
+        logger.info(f'[Model saved]')
+
 
             
 if __name__ == '__main__':
