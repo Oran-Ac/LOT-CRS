@@ -334,8 +334,6 @@ def main():
     evaluator = RecEvaluator()
     
     # 加载训练集 测试集
-    # 数据集处理，和unicrs对齐（1，添加word分词 2用@替换电影）
-    # 分词器1.添加带@的新词 2. 分词 3. 获得@的表示并保存，便于后续进行初始化
     train_dataset = CRSDatasetRecommendation(args.data_file_path,args.backbone_model,args.data_type,'train',word_pad_index = config['vocab']['pad_word_idx'],
                                             entity_pad_index = config['vocab']['pad_entity_idx'],context_tokenizer = tokenizer,
                                             dbpedia_tokenzier = config['graph']['entity2id'],word_tokenizer = config['graph']['token2id'],
@@ -478,7 +476,6 @@ def main():
             batch['entity_graph_representations'] = kgsf_outputs['entity_graph_representations']
             query_representation,last_hidden_states = model(batch,mode ='query_representation')
             batch['last_hidden_states'] = last_hidden_states
-            #done:检查这里的device加载对没有
             faiss_aug = faiss_search(representation = query_representation,
                                     faiss_index = faiss_index,
                                     dstore_keys = dstore_keys,
@@ -581,7 +578,6 @@ def main():
             test_loss.append(float(outputs['rec_loss']))
             rec_scores = outputs['movie_scores'] #[0-6924] /[0-len(self.movie-id)]
             ranks = torch.topk(rec_scores, k=50, dim=-1).indices.tolist()
-            # 下面的要求是让区间在【0-6924】之间，方便后面的长尾的指标计算
             if args.add_knowledge_prompt:
                 labels = batch['rec_dbpedia_movie_label_batch']
             else:
