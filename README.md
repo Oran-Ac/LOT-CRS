@@ -1,4 +1,8 @@
 # LOT-CRS
+
+
+
+
 This is the official PyTorch implementation for the paper:
 > Zhipeng Zhao, Kun Zhou, Xiaolei Wang, Wayne Xin Zhao, Fan Pan, Zhao Cao, Ji-Rong Wen. Alleviating the Long-Tail Problem in Conversational Recommender Systems. RecSys 2023.
 
@@ -17,6 +21,9 @@ public CRS datasets have demonstrated the effectiveness and extensibility of our
 ![model](./asset/model.png)
 
 ## Environment Configuration
+
+$\color{red}{Notes :}$ `data` and `readme.md` is still under construction.
+
 ### Build Docker Image
 ```bash
 $ docker build -f Dockerfile -t LOT-CRS .
