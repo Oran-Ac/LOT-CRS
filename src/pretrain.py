@@ -182,7 +182,6 @@ def get_process_data(original_data_path,tokenizer,prefix_matters,test_mode=False
             total_keys += len(each['keyword'])
         
     new_dialogue = []
-    # hypo：假设出现的keyword都不常见，因此用这种方式进行匹配(undo:是否有更好的解决办法&该假设是否成立)
     special_token_ids = [ tokenizer.encode(each,add_special_tokens=False) for each in special_token]
     if prefix_matters:
         special_token_ids.extend([ tokenizer.encode('Ġ'+each,add_special_tokens=False) for each in special_token])
@@ -253,8 +252,6 @@ def main():
 
 
     # 加载训练集 测试集
-    # undo: 这个地方有问题，dataset不能加载此前的，此前的进行过填充，应该1. 如果没有用过该分词处理，则用分词处理，且@的表示应该保留 2. 如果处理后，可以直接加载
-    # 分词器1.添加带@的新词 2. 分词 3. 获得@的表示并保存，便于后续进行初始化
     train_dataset_path = os.path.join(args.data_file_path,args.backbone_model,'pretrain','processed_dialogue.pkl')
     eval_dataset_path = os.path.join(args.data_file_path,args.backbone_model,'pretrain','processed_dialogue_valid.pkl')
     
@@ -307,8 +304,6 @@ def main():
     # assert model.config.vocab_size == 37446
 
     # Data collator
-    # This one will take care of randomly masking the tokens.
-    # done 这里要更改，只mask key word部分(由PretrainDataset与dialogue.py共同实现)
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm_probability=args.mlm_probability)
 
     # DataLoaders creation:
@@ -320,7 +315,6 @@ def main():
     # Optimizer
     # Split weights in two groups, one with weight decay and the other not.
     no_decay = ["bias", "LayerNorm.weight"]
-    # undo:这里可能有问题 =》 done：没问题，一切正常
     
     optimizer_grouped_parameters = [
         {
@@ -492,7 +486,6 @@ def main():
     if args.output_dir is not None:
         accelerator.wait_for_everyone()
         unwrapped_model = accelerator.unwrap_model(model)
-        # done:用accelerator.save保存模型，先判断accelerator.is_main_process
         if accelerator.is_main_process:
             accelerator.save(unwrapped_model.state_dict(),os.path.join(args.output_dir,f'pretrain_{args.backbone_model}.pth'))
             logger.info(f'[Model saved]: pretrian_{args.backbone_model}.pth')
