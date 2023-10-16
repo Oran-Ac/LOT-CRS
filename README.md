@@ -22,7 +22,7 @@ public CRS datasets have demonstrated the effectiveness and extensibility of our
 
 ## Environment Configuration
 
-$\color{red}{Notes :}$ `data` and `readme.md` is still under construction.
+$\color{red}{Notes :}$ `data` and `readme.md` are still under construction.
 
 ### Build Docker Image
 ```bash
