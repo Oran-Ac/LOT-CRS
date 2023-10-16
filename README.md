@@ -23,7 +23,7 @@ $ docker build -f Dockerfile -t LOT-CRS .
 ```
 ### Create Docker Container
 ```bash
-$ docker run --name=LOT-CRS --gpus all -it -v <your_path_to_folder>:/Privacy-in-Code-Models LOT-CRS:latest
+$ docker run --name=LOT-CRS --gpus all -it -v <your_path_to_folder>:/LOT-CRS LOT-CRS:latest
 ```
 
 ### Settings
